@@ -130,6 +130,58 @@ impl<T: AsRef<str> + PartialEq + Eq + Hash> SmtpClientBuilder<T> {
         .map_err(|_| crate::Error::Timeout)?
     }
 
+/// Connect over TLS with existing stream
+    pub async fn connect_with_stream(
+        &self,
+        stream: TcpStream,
+    ) -> crate::Result<SmtpClient<TlsStream<TcpStream>>> {
+        tokio::time::timeout(self.timeout, async {
+            let mut client = SmtpClient {
+                stream,
+                timeout: self.timeout,
+            };
+
+            let mut client = if self.tls_implicit {
+                let mut client = client
+                    .into_tls(&self.tls_connector, self.tls_hostname.as_ref())
+                    .await?;
+                // Read greeting
+                client.read().await?.assert_positive_completion()?;
+                client
+            } else {
+                // Read greeting
+                client.read().await?.assert_positive_completion()?;
+
+                // Send EHLO
+                let response = if !self.is_lmtp {
+                    client.ehlo(&self.local_host).await?
+                } else {
+                    client.lhlo(&self.local_host).await?
+                };
+                if response.has_capability(EXT_START_TLS) {
+                    client
+                        .start_tls(&self.tls_connector, self.tls_hostname.as_ref())
+                        .await?
+                } else {
+                    return Err(crate::Error::MissingStartTls);
+                }
+            };
+
+            if self.say_ehlo {
+                // Obtain capabilities
+                let capabilities = client.capabilities(&self.local_host, self.is_lmtp).await?;
+                // Authenticate
+                if let Some(credentials) = &self.credentials {
+                    client.authenticate(&credentials, &capabilities).await?;
+                }
+            }
+
+            Ok(client)
+        })
+        .await
+        .map_err(|_| crate::Error::Timeout)?
+    }
+
     /// Connect over clear text (should not be used)
     pub async fn connect_plain(&self) -> crate::Result<SmtpClient<TcpStream>> {
         let mut client = SmtpClient {
